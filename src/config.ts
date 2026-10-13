@@ -1,5 +1,7 @@
 /** Runtime configuration, read once at startup from the environment. */
 
+import { ALLOWED_HOST, ALLOWED_PROTOCOL, assertAllowedUrl } from "./lib/host-guard.js";
+
 export interface Config {
   apiToken: string;
   baseUrl: string;
@@ -7,6 +9,12 @@ export interface Config {
   readOnly: boolean;
   /** When true, mutating operations describe what they would send instead of sending it. */
   dryRun: boolean;
+  /**
+   * Safe mode (default ON): bank accounts, DELETE endpoints and the
+   * cancel/email/book/enshrine operations are hidden and refused. Only
+   * SEVDESK_SAFE_MODE=false switches it off. See lib/safe-mode.ts.
+   */
+  safeMode: boolean;
   /**
    * VAT regime the account lives under. `auto` (the default) infers it
    * from the ledger at first use; explicit values win outright.
@@ -32,6 +40,15 @@ function bool(value: string | undefined, fallback = false): boolean {
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
+/**
+ * Fail-safe flag: only an explicit "false"-like value switches it OFF. An
+ * empty string, a typo or any other value keeps the protection on.
+ */
+function explicitlyOff(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  return ["0", "false", "no", "off"].includes(value.trim().toLowerCase());
+}
+
 function int(value: string | undefined, fallback: number): number {
   const n = Number.parseInt(value ?? "", 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -43,6 +60,8 @@ function rate(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
+
+export const DEFAULT_BASE_URL = "https://my.sevdesk.de/api/v1";
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const apiToken = env.SEVDESK_API_TOKEN?.trim();
@@ -74,11 +93,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     vatRegimeSource = "legacy-env";
   }
 
+  // The base URL may vary in path (API version), never in host: the token is
+  // sent as a header to whatever this points at. Fail loudly at startup; the
+  // HTTP client re-checks every request as the last line.
+  const baseUrl = (env.SEVDESK_BASE_URL ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+  try {
+    assertAllowedUrl(baseUrl);
+  } catch (err) {
+    throw new Error(
+      `SEVDESK_BASE_URL='${env.SEVDESK_BASE_URL}' is not allowed: ` +
+        (err instanceof Error ? err.message : String(err)) +
+        ` Only ${ALLOWED_PROTOCOL}//${ALLOWED_HOST} is permitted (default ${DEFAULT_BASE_URL}).`,
+    );
+  }
+
   return {
     apiToken,
-    baseUrl: (env.SEVDESK_BASE_URL ?? "https://my.sevdesk.de/api/v1").replace(/\/+$/, ""),
+    baseUrl,
     readOnly: bool(env.SEVDESK_READ_ONLY, false),
     dryRun: bool(env.SEVDESK_DRY_RUN, false),
+    safeMode: !explicitlyOff(env.SEVDESK_SAFE_MODE),
     vatRegime,
     vatRegimeSource,
     requestTimeoutMs: int(env.SEVDESK_TIMEOUT_MS, 30_000),

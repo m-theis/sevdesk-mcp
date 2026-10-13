@@ -27,6 +27,12 @@ import {
   type ToolDef,
 } from "../lib/tool.js";
 import { regimeMismatch } from "../lib/profile.js";
+import {
+  CONFIRM_FINALIZE_SCHEMA,
+  INVOICE_DRAFT_STATUS,
+  isFinalizedInvoiceStatus,
+  requireFinalizeConfirmation,
+} from "../lib/safe-mode.js";
 
 /** Rule ids the sevDesk API accepts on vouchers — one source for schema enums and error texts. */
 const VOUCHER_RULE_IDS = Object.entries(TAX_RULES)
@@ -439,8 +445,11 @@ const listContacts: ToolDef = {
 const listTransactions: ToolDef = {
   name: "sevdesk_list_transactions",
   title: "List bank transactions",
-  description: "List bank transactions, optionally for one account and period. Read-only.",
+  description:
+    "List bank transactions, optionally for one account and period. Read-only. " +
+    "Not available in safe mode (default).",
   mutating: false,
+  blockedInSafeMode: true,
   inputSchema: {
     type: "object",
     properties: {
@@ -786,9 +795,11 @@ const createInvoice: ToolDef = {
   name: "sevdesk_create_invoice",
   title: "Create a draft invoice",
   description:
-    "Create an outgoing invoice as a draft (status 50) — always a draft, so nothing reaches a " +
+    "Create an outgoing invoice as a draft (status 100) by default, so nothing reaches a " +
     "customer without review in sevDesk. Positions carry name, quantity, price and tax rate; " +
-    "the contact's address is filled in automatically. Honors SEVDESK_DRY_RUN.",
+    "the contact's address is filled in automatically. status 200 finalizes the invoice " +
+    "immediately and requires confirm_finalize: true. Honors SEVDESK_DRY_RUN. For a complete " +
+    "invoice with service period, position texts, units and texts prefer sevdesk_draft_invoice.",
   mutating: true,
   inputSchema: {
     type: "object",
@@ -817,6 +828,12 @@ const createInvoice: ToolDef = {
         enum: ["1", "2", "3", "4", "5", "11", "17", "18", "19", "20", "21"],
       }),
       currency: str("Currency (default EUR)."),
+      status: str(
+        "100 = Entwurf/draft (default). 200 = offen/open: finalizes the invoice at once — " +
+          "invoice number assigned, legally binding — and requires confirm_finalize: true.",
+        { enum: ["100", "200"] },
+      ),
+      confirm_finalize: CONFIRM_FINALIZE_SCHEMA,
       dryRun: bool("Preview the request without sending it."),
     },
     required: ["contactId", "positions"],
@@ -826,6 +843,15 @@ const createInvoice: ToolDef = {
     const contactId = requireString(args, "contactId");
     const positions = Array.isArray(args.positions) ? (args.positions as Row[]) : [];
     if (positions.length === 0) throw new Error("At least one position is required.");
+
+    const status = optString(args, "status") ?? INVOICE_DRAFT_STATUS;
+    if (status !== INVOICE_DRAFT_STATUS && status !== "200") {
+      throw new Error(`status '${status}' is not allowed here — use 100 (draft) or 200 (open).`);
+    }
+    const finalizing = isFinalizedInvoiceStatus(status);
+    if (finalizing && !isDryRun(args, ctx)) {
+      requireFinalizeConfirmation(args, `creates the invoice with status ${status} (open) instead of as a draft`);
+    }
 
     // The regime only chooses the default RULE; the rule then dictates the
     // default rate. An account whose regime cannot be detected gets no
@@ -881,8 +907,8 @@ const createInvoice: ToolDef = {
         objectName: "Invoice",
         mapAll: true,
         invoiceDate: date,
-        // Always a draft (invoice status 100): review happens in sevDesk, never silently.
-        status: "100",
+        // Draft (100) unless the caller asked for 200 and confirmed the finalization.
+        status,
         invoiceType: "RE",
         currency: optString(args, "currency") ?? "EUR",
         contact: { id: Number(contactId), objectName: "Contact" },
@@ -906,7 +932,13 @@ const createInvoice: ToolDef = {
     };
 
     if (isDryRun(args, ctx)) {
-      return { dryRun: true, wouldSend: { method: "POST", path: "/Invoice/Factory/saveInvoice", body } };
+      return {
+        dryRun: true,
+        wouldSend: { method: "POST", path: "/Invoice/Factory/saveInvoice", body },
+        ...(finalizing
+          ? { note: "The real call finalizes the invoice (status 200) and requires confirm_finalize: true." }
+          : {}),
+      };
     }
 
     const { data } = await ctx.client.request<{ objects?: { invoice?: Row } }>({
@@ -919,8 +951,266 @@ const createInvoice: ToolDef = {
     return {
       invoiceId: String(created?.id ?? ""),
       invoiceNumber: created?.invoiceNumber ?? null,
-      status: "Entwurf (draft)",
-      note: "Review the draft in sevDesk before sending it to the customer.",
+      status: finalizing ? "offen (open, finalized)" : "Entwurf (draft)",
+      note: finalizing
+        ? "The invoice is finalized and numbered. Review it in sevDesk before sending."
+        : "Review the draft in sevDesk before sending it to the customer.",
+    };
+  },
+};
+
+/* ------------------- complete invoice draft (strict) ------------------- */
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Parse a strict yyyy-mm-dd argument; the name is used in the error. */
+function requireYmd(args: Record<string, unknown>, key: string): string {
+  const v = requireString(args, key);
+  const d = parseSevdeskDate(v);
+  if (!YMD.test(v) || !d || ymd(d) !== v) {
+    throw new Error(`'${key}' must be a valid date in yyyy-mm-dd format, got '${v}'.`);
+  }
+  return v;
+}
+
+type UnityRow = { id: unknown; name?: unknown; translationCode?: unknown };
+/** One /Unity lookup per client (i.e. per account), shared by all calls. */
+const unityCache = new WeakMap<object, Promise<UnityRow[]>>();
+
+/**
+ * Resolve a position's `unity` to a sevDesk Unity id. Numeric input is taken
+ * as the id itself; a name (e.g. "Stück", "Std", "Pauschal") is looked up
+ * once per process via GET /Unity. The list is account-specific, so nothing
+ * is hard-coded here beyond the lookup.
+ */
+async function resolveUnityId(ctx: ToolContext, raw: unknown, position: number): Promise<number> {
+  if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (/^\d+$/.test(text)) return Number(text);
+  if (!text) throw new Error(`Position ${position}: 'unity' is required (Unity id or name such as "Stück" or "Std").`);
+
+  let pending = unityCache.get(ctx.client);
+  if (!pending) {
+    pending = ctx.client.getAll<UnityRow>("/Unity", {}, { maxItems: 500 });
+    unityCache.set(ctx.client, pending);
+    pending.catch(() => unityCache.delete(ctx.client)); // a transient failure must not stick
+  }
+  let units: UnityRow[];
+  try {
+    units = await pending;
+  } catch (err) {
+    throw new Error(
+      `Position ${position}: cannot resolve unity '${text}' by name — GET /Unity failed ` +
+        `(${err instanceof Error ? err.message : String(err)}). Pass the numeric Unity id instead (1 = Stück).`,
+    );
+  }
+  const wanted = text.toLowerCase();
+  const hit = units.find(
+    (u) =>
+      String(u.name ?? "").toLowerCase() === wanted ||
+      String(u.translationCode ?? "").toLowerCase() === wanted ||
+      String(u.translationCode ?? "").toLowerCase() === `unity_${wanted}`,
+  );
+  if (!hit) {
+    const names = units.map((u) => `${u.name ?? "?"} (${u.id})`).slice(0, 40).join(", ");
+    throw new Error(`Position ${position}: unknown unity '${text}'. Known units: ${names || "none returned"}.`);
+  }
+  return Number(hit.id);
+}
+
+const draftInvoice: ToolDef = {
+  name: "sevdesk_draft_invoice",
+  title: "Draft a complete invoice",
+  description:
+    "Create a complete outgoing invoice as a DRAFT (status 100) in one call: customer, invoice " +
+    "date, service period (deliveryDate … deliveryDateUntil), tax rule and positions with name, " +
+    "text, quantity, unit, net unit price and tax rate. Nothing is optional that a correct " +
+    "German invoice needs; nothing is finalized — review and send happen in sevDesk. Returns " +
+    "the draft id, net/tax/gross sums and the service period. Honors SEVDESK_DRY_RUN.",
+  mutating: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      contactId: str("Numeric id of the customer contact (sevdesk_list_contacts)."),
+      invoiceDate: str("Invoice date, yyyy-mm-dd."),
+      deliveryDate: str("Start of the service period (Leistungszeitraum von), yyyy-mm-dd."),
+      deliveryDateUntil: str("End of the service period (Leistungszeitraum bis), yyyy-mm-dd; same day as deliveryDate for a single date."),
+      taxRule: str(
+        "Revenue tax rule id: 1 = regular VAT, 2 = export, 3 = intra-EU supply, 4 = tax-free, 5 = reverse charge §13b, 11 = §19 Kleinunternehmer, 17–21 = OSS/§18b.",
+        { enum: ["1", "2", "3", "4", "5", "11", "17", "18", "19", "20", "21"] },
+      ),
+      positions: {
+        type: "array",
+        description: "Invoice line items, in order.",
+        minItems: 1,
+        items: {
+          type: "object",
+          properties: {
+            name: str("Position title as printed on the invoice."),
+            text: str("Position description (may be empty, but must be given)."),
+            quantity: { type: "number", description: "Quantity, > 0." },
+            unity: {
+              description: "Unit: numeric sevDesk Unity id, or a unit name from the account (e.g. \"Stück\", \"Std\", \"Pauschal\").",
+              anyOf: [{ type: "integer", minimum: 1 }, { type: "string" }],
+            },
+            price: { type: "number", description: "Net unit price in invoice currency." },
+            taxRate: { type: "number", description: "VAT rate in percent for this position; must be allowed by taxRule." },
+          },
+          required: ["name", "text", "quantity", "unity", "price", "taxRate"],
+          additionalProperties: false,
+        },
+      },
+      header: str("Invoice title line (default: sevDesk's own, usually 'Rechnung Nr. …')."),
+      headText: str("Text above the positions (HTML allowed by sevDesk)."),
+      footText: str("Text below the positions, e.g. payment instructions (HTML allowed)."),
+      customerInternalNote: str("Internal note, not printed."),
+      paymentTerms: { type: "integer", description: "Payment term in days (sevDesk timeToPay).", minimum: 0 },
+      currency: str("Currency (default EUR)."),
+      dryRun: bool("Preview the request without sending it."),
+    },
+    required: ["contactId", "invoiceDate", "deliveryDate", "deliveryDateUntil", "taxRule", "positions"],
+    additionalProperties: false,
+  },
+  async handler(args, ctx) {
+    const contactId = requireString(args, "contactId");
+    if (!/^\d+$/.test(contactId)) throw new Error("'contactId' must be a numeric id.");
+    const invoiceDate = requireYmd(args, "invoiceDate");
+    const deliveryDate = requireYmd(args, "deliveryDate");
+    const deliveryDateUntil = requireYmd(args, "deliveryDateUntil");
+    if (deliveryDateUntil < deliveryDate) {
+      throw new Error(`'deliveryDateUntil' (${deliveryDateUntil}) lies before 'deliveryDate' (${deliveryDate}).`);
+    }
+
+    const ruleId = requireString(args, "taxRule");
+    const rule = TAX_RULES[ruleId as TaxRuleId];
+    if (!rule || rule.side !== "revenue" || ruleId === "22") {
+      throw new Error(`taxRule '${ruleId}' is not a usable invoice revenue rule.`);
+    }
+
+    const raw = Array.isArray(args.positions) ? (args.positions as Row[]) : [];
+    if (raw.length === 0) throw new Error("At least one position is required.");
+
+    const invoicePosSave = [];
+    let sumNet = 0;
+    let sumTax = 0;
+    for (const [i, p] of raw.entries()) {
+      const n = i + 1;
+      const name = typeof p.name === "string" ? p.name.trim() : "";
+      if (!name) throw new Error(`Position ${n}: 'name' is required.`);
+      if (typeof p.text !== "string") throw new Error(`Position ${n}: 'text' is required (use "" for none).`);
+      const quantity = num(p.quantity);
+      if (!(quantity > 0)) throw new Error(`Position ${n}: 'quantity' must be a positive number.`);
+      if (typeof p.price !== "number" || !Number.isFinite(p.price)) {
+        throw new Error(`Position ${n}: 'price' must be a number (net unit price).`);
+      }
+      if (typeof p.taxRate !== "number" || !Number.isFinite(p.taxRate)) {
+        throw new Error(`Position ${n}: 'taxRate' must be a number.`);
+      }
+      const allowed = rule.allowedRates as readonly number[] | null;
+      if (allowed !== null && !allowed.includes(p.taxRate)) {
+        throw new Error(
+          `Position ${n}: taxRate ${p.taxRate} is not allowed with tax rule ${ruleId} ` +
+            `("${rule.label}") — allowed: ${allowed.join(", ")}.`,
+        );
+      }
+      const unityId = await resolveUnityId(ctx, p.unity, n);
+      const net = quantity * p.price;
+      sumNet += net;
+      sumTax += (net * p.taxRate) / 100;
+      invoicePosSave.push({
+        objectName: "InvoicePos",
+        mapAll: true,
+        positionNumber: i,
+        name,
+        text: p.text,
+        quantity,
+        price: p.price,
+        taxRate: p.taxRate,
+        unity: { id: unityId, objectName: "Unity" },
+      });
+    }
+    sumNet = round2(sumNet);
+    sumTax = round2(sumTax);
+    const sumGross = round2(sumNet + sumTax);
+
+    const headerRate = invoicePosSave[0]!.taxRate;
+    const taxText =
+      ruleId === "11"
+        ? "Gemäß § 19 UStG wird keine Umsatzsteuer berechnet."
+        : headerRate > 0
+          ? `Umsatzsteuer ${headerRate}%`
+          : rule.label;
+
+    const opt = (key: string) => {
+      const v = optString(args, key);
+      return v ? { [key]: v } : {};
+    };
+    const paymentTerms = optNumber(args, "paymentTerms");
+    if (paymentTerms !== undefined && (!Number.isInteger(paymentTerms) || paymentTerms < 0)) {
+      throw new Error("'paymentTerms' must be a non-negative whole number of days.");
+    }
+
+    const body = {
+      invoice: {
+        objectName: "Invoice",
+        mapAll: true,
+        invoiceDate,
+        deliveryDate,
+        deliveryDateUntil,
+        // Always a draft: this tool never finalizes. Use sevdesk_mark_invoice_sent
+        // with confirm_finalize: true once the user has reviewed it in sevDesk.
+        status: INVOICE_DRAFT_STATUS,
+        invoiceType: "RE",
+        currency: optString(args, "currency") ?? "EUR",
+        contact: { id: Number(contactId), objectName: "Contact" },
+        taxRule: { id: ruleId, objectName: "TaxRule" },
+        taxRate: headerRate,
+        taxText,
+        discount: 0,
+        ...opt("header"),
+        ...opt("headText"),
+        ...opt("footText"),
+        ...opt("customerInternalNote"),
+        ...(paymentTerms !== undefined ? { timeToPay: paymentTerms } : {}),
+      },
+      invoicePosSave,
+      invoicePosDelete: null,
+      discountSave: null,
+      discountDelete: null,
+      takeDefaultAddress: true,
+    };
+
+    const period = { deliveryDate, deliveryDateUntil };
+    const sums = { sumNet, sumTax, sumGross, currency: body.invoice.currency };
+
+    if (isDryRun(args, ctx)) {
+      return {
+        dryRun: true,
+        wouldSend: { method: "POST", path: "/Invoice/Factory/saveInvoice", body },
+        expected: { ...sums, servicePeriod: period, positions: invoicePosSave.length },
+      };
+    }
+
+    const { data } = await ctx.client.request<{ objects?: { invoice?: Row } }>({
+      method: "POST",
+      path: "/Invoice/Factory/saveInvoice",
+      body,
+      mutating: true,
+    });
+    const created = data?.objects?.invoice ?? {};
+    const apiNet = created.sumNet !== undefined ? round2(num(created.sumNet)) : sumNet;
+    const apiGross = created.sumGross !== undefined ? round2(num(created.sumGross)) : sumGross;
+    return {
+      invoiceId: String(created.id ?? ""),
+      invoiceNumber: created.invoiceNumber ?? null,
+      status: "Entwurf (draft, 100)",
+      sumNet: apiNet,
+      sumTax: round2(apiGross - apiNet),
+      sumGross: apiGross,
+      currency: body.invoice.currency,
+      servicePeriod: period,
+      positions: invoicePosSave.length,
+      note: "Draft created. Review it in sevDesk; finalizing/sending needs a separate, confirmed step.",
     };
   },
 };
@@ -982,8 +1272,9 @@ const markInvoiceSent: ToolDef = {
   title: "Mark an invoice as sent",
   description:
     "Mark an invoice as sent without emailing anything (send types: PDF download, print, " +
-    "postal — deliberately no email). Refuses enshrined invoices and verifies the result. " +
-    "Honors SEVDESK_DRY_RUN.",
+    "postal — deliberately no email). On a draft (status 100) this FINALIZES the invoice " +
+    "(status 200) and requires confirm_finalize: true. Refuses enshrined invoices and " +
+    "verifies the result. Honors SEVDESK_DRY_RUN.",
   mutating: true,
   inputSchema: {
     type: "object",
@@ -992,6 +1283,7 @@ const markInvoiceSent: ToolDef = {
       sendType: str("How the invoice left the house (default VPDF).", {
         enum: ["VPDF", "VPR", "VP"],
       }),
+      confirm_finalize: CONFIRM_FINALIZE_SCHEMA,
       dryRun: bool("Preview the request without sending it."),
     },
     required: ["invoiceId"],
@@ -1001,11 +1293,21 @@ const markInvoiceSent: ToolDef = {
     const id = requireString(args, "invoiceId");
     const sendType = optString(args, "sendType") ?? "VPDF";
 
-    await fetchUnenshrined(ctx, "Invoice", id);
+    const invoice = await fetchUnenshrined(ctx, "Invoice", id);
+    const isDraft = String(invoice.status ?? "") === INVOICE_DRAFT_STATUS;
 
     const body = { sendType, sendDraft: false };
     if (isDryRun(args, ctx)) {
-      return { dryRun: true, wouldSend: { method: "PUT", path: `/Invoice/${id}/sendBy`, body } };
+      return {
+        dryRun: true,
+        wouldSend: { method: "PUT", path: `/Invoice/${id}/sendBy`, body },
+        ...(isDraft
+          ? { note: `Invoice ${id} is a draft: the real call finalizes it (100 → 200) and requires confirm_finalize: true.` }
+          : {}),
+      };
+    }
+    if (isDraft) {
+      requireFinalizeConfirmation(args, `marks draft invoice ${id} as sent, which finalizes it (status 100 → 200)`);
     }
 
     await ctx.client.request({
@@ -1041,6 +1343,7 @@ export const resourceTools: ToolDef[] = [
   receiptGuidance,
   setTaxRule,
   createInvoice,
+  draftInvoice,
   getInvoicePdf,
   markInvoiceSent,
 ];

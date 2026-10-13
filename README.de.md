@@ -93,9 +93,9 @@ Sobald du dem Setup vertraust: `SEVDESK_READ_ONLY` auf `"false"` setzen und den 
 
 ### Alltag
 
-`sevdesk_ping` · `sevdesk_summarize` · `sevdesk_list_vouchers` · `sevdesk_get_voucher` · `sevdesk_list_invoices` · `sevdesk_list_contacts` · `sevdesk_list_transactions` · `sevdesk_receipt_guidance` · `sevdesk_upload_voucher_file` · `sevdesk_create_voucher` · `sevdesk_set_tax_rule` · `sevdesk_create_invoice` · `sevdesk_get_invoice_pdf` · `sevdesk_mark_invoice_sent`
+`sevdesk_ping` · `sevdesk_summarize` · `sevdesk_list_vouchers` · `sevdesk_get_voucher` · `sevdesk_list_invoices` · `sevdesk_list_contacts` · `sevdesk_list_transactions` · `sevdesk_receipt_guidance` · `sevdesk_upload_voucher_file` · `sevdesk_create_voucher` · `sevdesk_set_tax_rule` · `sevdesk_create_invoice` · `sevdesk_draft_invoice` · `sevdesk_get_invoice_pdf` · `sevdesk_mark_invoice_sent`
 
-Highlights: `sevdesk_summarize` aggregiert Rechnungen oder Belege serverseitig — Anzahl und Netto-/Steuer-/Brutto-Summen, gruppiert nach Monat, Status oder Kontakt — Fragen wie „Umsatz in Q2“ oder „Ausgaben je Lieferant“ kosten damit ein paar hundert Tokens, egal wie groß das Buchungsjournal ist. `sevdesk_receipt_guidance` beantwortet „welche Kombinationen aus Buchungskonto, Steuerregel und Steuersatz akzeptiert sevDesk tatsächlich" aus sevDesks eigener Validierungstabelle. `sevdesk_set_tax_rule` bucht einen Beleg-Entwurf mit Leitplanken auf eine andere Steuerregel um. `sevdesk_create_invoice` erstellt immer **Entwürfe** — nichts erreicht einen Kunden ohne Review. `sevdesk_get_invoice_pdf` speichert das gerenderte PDF, ohne den Versandstatus der Rechnung anzufassen.
+Highlights: `sevdesk_summarize` aggregiert Rechnungen oder Belege serverseitig — Anzahl und Netto-/Steuer-/Brutto-Summen, gruppiert nach Monat, Status oder Kontakt — Fragen wie „Umsatz in Q2“ oder „Ausgaben je Lieferant“ kosten damit ein paar hundert Tokens, egal wie groß das Buchungsjournal ist. `sevdesk_receipt_guidance` beantwortet „welche Kombinationen aus Buchungskonto, Steuerregel und Steuersatz akzeptiert sevDesk tatsächlich" aus sevDesks eigener Validierungstabelle. `sevdesk_set_tax_rule` bucht einen Beleg-Entwurf mit Leitplanken auf eine andere Steuerregel um. `sevdesk_create_invoice` und das strengere `sevdesk_draft_invoice` (Leistungszeitraum, Positionstexte, Einheiten, Zahlungsziel — jedes Feld einer korrekten Rechnung ist Pflicht) erstellen **Entwürfe** — nichts erreicht einen Kunden ohne Review; Finalisieren verlangt `confirm_finalize: true`. `sevdesk_get_invoice_pdf` speichert das gerenderte PDF, ohne den Versandstatus der Rechnung anzufassen.
 
 ### Vollständige Abdeckung
 
@@ -134,10 +134,11 @@ des Servers und die Tool-Beschreibungen tragen das Wesentliche.
 | `SEVDESK_API_TOKEN` | *(erforderlich)* | Dein sevDesk-API-Token |
 | `SEVDESK_READ_ONLY` | `false` | Blendet Schreib-Tools aus; `sevdesk_call` bleibt sichtbar, verweigert aber schreibende Operationen beim Aufruf |
 | `SEVDESK_DRY_RUN` | `false` | Zeigt, was ein Schreibzugriff senden *würde*, ohne zu senden |
+| `SEVDESK_SAFE_MODE` | `true` | Safe-Mode (Snapp-X-Fork): blendet Bankkonten, `DELETE`, Rechnung stornieren/mailen/buchen und Beleg buchen/festschreiben aus und lehnt sie ab. Nur ein explizites `false` schaltet ab. Siehe [Snapp X fork: safe mode](#snapp-x-fork-safe-mode) |
 | `SEVDESK_VAT_REGIME` | `auto` | `regular`, `kleinunternehmer` (§19 UStG) oder `auto`. `auto` erkennt das Regime aus den letzten Rechnungen; `sevdesk_ping` zeigt Ergebnis und Begründung. Steuerregel-Defaults und Prüfungs-Empfehlungen folgen dem Regime. Ein expliziter Wert, der dem Buchungsbestand widerspricht, wird als Prüfungs-Finding gemeldet — nie stillschweigend übernommen |
 | `SEVDESK_KLEINUNTERNEHMER` | `false` | Veraltet — bitte `SEVDESK_VAT_REGIME=kleinunternehmer` verwenden. Wird weiter beachtet, solange `SEVDESK_VAT_REGIME` nicht gesetzt ist |
 | `SEVDESK_RECEIPT_DIRS` | *(nicht gesetzt — Datei-Tools deaktiviert)* | Doppelpunkt-getrennte Positivliste der Verzeichnisse für die Beleg-Datei-Tools |
-| `SEVDESK_BASE_URL` | `https://my.sevdesk.de/api/v1` | API-Host überschreiben |
+| `SEVDESK_BASE_URL` | `https://my.sevdesk.de/api/v1` | API-*Pfad* überschreiben (z. B. neuere API-Version). Der Host ist fest auf `https://my.sevdesk.de` verdrahtet; jeder andere Host verhindert den Start. |
 | `SEVDESK_TIMEOUT_MS` | `30000` | Timeout pro Anfrage |
 | `SEVDESK_MAX_RETRIES` | `3` | Wiederholungen mit gejittertem Backoff und begrenztem `Retry-After`. Ein 429 wird immer wiederholt (der gedrosselte Aufruf lief nie); ein 5xx oder Netzwerkfehler nur bei **Lesezugriffen** — ein Schreibzugriff wird bei unklarem Ausgang nie erneut gesendet, ein Timeout kann also keinen doppelten Entwurf erzeugen |
 | `SEVDESK_RATE_LIMIT` | `4` | Clientseitige Drosselung in Requests/Sekunde (Token-Bucket), damit Audit-Abfragesalven nicht mit sevDesks Limit kollidieren. `0` deaktiviert |
@@ -157,6 +158,100 @@ Bedrohungsmodell, Garantien und Schwachstellenmeldung: [SECURITY.md](SECURITY.md
 ## Datenschutz
 
 Alles läuft lokal: Token und Buchhaltungsdaten fließen ausschließlich zwischen deinem MCP-Client und der sevDesk-API — keine Speicherung, keine Telemetrie, keine Dritten. Vollständige Erklärung: [PRIVACY.md](PRIVACY.md) (englisch).
+
+## Snapp X fork: safe mode
+
+Dieser Fork (`m-theis/sevdesk-mcp`, Basis `joosthel/sevdesk-mcp`) ist auf einen
+Zweck zugeschnitten: Claude legt Rechnungen als **Entwurf** an, mehr nicht. Dafür
+gibt es drei Schutzschichten, die zusätzlich zu Read-Only und Dry-Run des
+Upstream-Projekts gelten.
+
+### Host-Whitelist
+
+Jeder ausgehende Request muss an `https://my.sevdesk.de` gehen — exakt dieser
+Host, HTTPS, Standardport, keine Zugangsdaten in der URL. Die Prüfung sitzt im
+HTTP-Client direkt vor `fetch` (`src/lib/host-guard.ts`) und zusätzlich beim
+Laden der Konfiguration: ein fremder Host in `SEVDESK_BASE_URL` verhindert den
+Start. Es gibt **keine** Umgebungsvariable und keinen Schalter, der das lockert.
+Der Token verlässt den Prozess damit ausschließlich Richtung sevDesk.
+
+### Safe-Mode (`SEVDESK_SAFE_MODE`, Default: an)
+
+Im Safe-Mode sind folgende Operationen weder im Tool-Katalog noch in
+`sevdesk_list_operations` sichtbar und werden bei Aufruf abgelehnt — auch als
+`dryRun`, auch wenn ein Client eine veraltete Toolliste zwischengespeichert hat:
+
+| Bereich | Gesperrt |
+|---|---|
+| Bankkonten | alles unter `/CheckAccount` und `/CheckAccountTransaction`, Lesen inklusive. Davon betroffen sind die Tools `sevdesk_list_transactions` und `sevdesk_reconcile_transactions` |
+| Löschen | jeder `DELETE`-Endpunkt (Kontakte, Gutschriften, Aufträge, Tags, …) |
+| Rechnungen | `cancelInvoice`, `sendViaEmail`, `bookAmount` |
+| Belege | `bookAmount` (Buchen), `enshrine` (Festschreiben) |
+
+Durchgesetzt wird das dreifach: in der Toolliste, beim Tool-Aufruf und als
+letzte Linie im HTTP-Client auf dem konkreten Request-Pfad
+(`src/lib/safe-mode.ts`). Abschalten geht nur mit `SEVDESK_SAFE_MODE=false`
+in der Umgebung des Servers, nicht aus einem Tool-Aufruf heraus. Leere oder
+unverständliche Werte lassen den Schutz an.
+
+### Finalisieren nur mit Bestätigung
+
+Eine Rechnung vom Entwurf (Status 100) in „offen" (Status 200) zu heben vergibt
+die Rechnungsnummer und macht das Dokument rechtsverbindlich. Jeder Aufruf, der
+das tut, verlangt deshalb den literalen Parameter `confirm_finalize: true` —
+unabhängig vom Safe-Mode:
+
+- `sevdesk_create_invoice` mit `status: "200"`
+- `sevdesk_mark_invoice_sent` auf einem Entwurf (`sendBy` finalisiert ihn)
+- `sevdesk_call` mit `createInvoiceByFactory` und Status ≥ 200, `invoiceSendBy`
+  ohne `sendDraft: true` oder `sendInvoiceViaEMail`
+
+Ohne Bestätigung scheitert der Aufruf, bevor etwas gesendet wird. Ein `dryRun`
+zeigt die Vorschau und weist auf die Pflicht hin.
+
+### `sevdesk_draft_invoice`: vollständige Rechnung in einem Aufruf
+
+Legt eine Rechnung mit Positionen als Entwurf an und verlangt alles, was eine
+korrekte Rechnung braucht: `contactId`, `invoiceDate`, Leistungszeitraum
+(`deliveryDate` bis `deliveryDateUntil`), `taxRule` und je Position `name`,
+`text`, `quantity`, `unity`, `price`, `taxRate`. Optional: `header`, `headText`,
+`footText`, `customerInternalNote`, `paymentTerms` (Tage). `unity` nimmt die
+Unity-ID oder einen Einheitennamen des Kontos („Std", „Stück"), der über
+`GET /Unity` aufgelöst wird. Die Antwort enthält Entwurfs-ID, Netto/Steuer/Brutto
+und den Leistungszeitraum. Der Status ist immer 100; Finalisieren ist ein
+eigener, bestätigter Schritt.
+
+```json
+{
+  "contactId": "77",
+  "invoiceDate": "2026-10-13",
+  "deliveryDate": "2026-09-01",
+  "deliveryDateUntil": "2026-09-30",
+  "taxRule": "1",
+  "positions": [
+    { "name": "Beratung", "text": "Workshop-Vorbereitung", "quantity": 2, "unity": "Std", "price": 100, "taxRate": 19 }
+  ],
+  "footText": "Zahlbar innerhalb von 14 Tagen.",
+  "paymentTerms": 14
+}
+```
+
+### Claude Desktop (macOS)
+
+```json
+{
+  "mcpServers": {
+    "sevdesk": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/sevdesk-mcp/dist/index.js"],
+      "env": {
+        "SEVDESK_API_TOKEN": "${SEVDESK_API_TOKEN}",
+        "SEVDESK_SAFE_MODE": "true"
+      }
+    }
+  }
+}
+```
 
 ## Schreibsicherheit
 

@@ -38,6 +38,12 @@ export interface ToolDef {
    * covers reads; its writes are still refused at the client layer).
    */
   listInReadOnly?: boolean;
+  /**
+   * Hidden from the tool list and refused on call while safe mode is on
+   * (default). For tools whose whole purpose is a blocked area, e.g. bank
+   * transactions. See lib/safe-mode.ts.
+   */
+  blockedInSafeMode?: boolean;
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>;
 }
 

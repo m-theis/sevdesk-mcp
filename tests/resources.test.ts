@@ -366,12 +366,14 @@ describe("sevdesk_get_invoice_pdf", () => {
 });
 
 describe("sevdesk_mark_invoice_sent", () => {
-  it("marks a non-enshrined invoice as sent by PDF and verifies", async () => {
+  it("marks a non-enshrined draft as sent by PDF (with confirm_finalize) and verifies", async () => {
     const invoice: Row = { id: "900", status: "100", enshrined: null, sendType: null };
     const { ctx, sent } = invoiceCtx(invoice);
-    const result = (await markInvoiceSent.handler({ invoiceId: "900" }, ctx)) as {
-      verified: boolean;
-    };
+    // A draft is finalized by sendBy, so the call needs the explicit confirmation.
+    const result = (await markInvoiceSent.handler(
+      { invoiceId: "900", confirm_finalize: true },
+      ctx,
+    )) as { verified: boolean };
     const put = sent.find((c) => c.path.endsWith("/sendBy"))!;
     expect((put.body as Row).sendType).toBe("VPDF");
     expect(result.verified).toBe(true);
