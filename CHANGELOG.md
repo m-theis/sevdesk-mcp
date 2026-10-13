@@ -19,7 +19,7 @@
   voucher `bookAmount` / `enshrine` (`src/lib/safe-mode.ts`).
 - **Finalizing needs `confirm_finalize: true`** (independent of safe mode):
   `sevdesk_create_invoice` with `status: "200"` (new parameter, default `100`),
-  `sevdesk_mark_invoice_sent` on a draft, and `sevdesk_call` with
+  `sevdesk_mark_invoice_sent` on a draft, and `sevdesk_call_write` with
   `createInvoiceByFactory` at status ≥ 200, `invoiceSendBy` without
   `sendDraft: true`, or `sendInvoiceViaEMail`. Dry runs preview and point at
   the requirement.
@@ -30,6 +30,12 @@
   `customerInternalNote`, `paymentTerms` (days → `timeToPay`). `unity` is a
   Unity id or a unit name resolved via `GET /Unity`. Returns draft id,
   net/tax/gross sums and the service period. Always status 100.
+- The generic caller is split by effect: `sevdesk_call` now runs GET
+  operations only and is declared read-only (`readOnlyHint`), so MCP
+  clients such as Claude Desktop can approve it once instead of per call;
+  `sevdesk_call_write` runs POST/PUT with `dryRun`, `confirm_finalize` and
+  the read-only gate. Each refuses operations of the other side and names
+  the right tool; `sevdesk_describe_operation` shows the matching one.
 - Fix: sevDesk requires `contactPerson` (a SevUser) on every invoice and
   answered 400 to `sevdesk_create_invoice` and `sevdesk_draft_invoice`
   without it. Both now set it: an explicit `contactPersonId` wins, else the

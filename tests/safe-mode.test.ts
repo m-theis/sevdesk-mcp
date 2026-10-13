@@ -1,6 +1,6 @@
 /**
  * Safe mode: blocked operations are hidden from both catalogues (MCP tool
- * list and sevdesk_call operation list), refused on call, and refused once
+ * list and sevdesk_call/sevdesk_call_write operation list), refused on call, and refused once
  * more inside the HTTP client. Finalizing an invoice always needs
  * confirm_finalize: true.
  */
@@ -27,6 +27,7 @@ type Row = Record<string, unknown>;
 const listOperations = discoveryTools.find((t) => t.name === "sevdesk_list_operations")!;
 const describeOperation = discoveryTools.find((t) => t.name === "sevdesk_describe_operation")!;
 const call = discoveryTools.find((t) => t.name === "sevdesk_call")!;
+const callWrite = discoveryTools.find((t) => t.name === "sevdesk_call_write")!;
 const createInvoice = resourceTools.find((t) => t.name === "sevdesk_create_invoice")!;
 const markInvoiceSent = resourceTools.find((t) => t.name === "sevdesk_mark_invoice_sent")!;
 const listTransactions = resourceTools.find((t) => t.name === "sevdesk_list_transactions")!;
@@ -160,6 +161,7 @@ describe("MCP tool list", () => {
     expect(names).not.toContain("sevdesk_reconcile_transactions");
     expect(names).toContain("sevdesk_create_invoice");
     expect(names).toContain("sevdesk_call");
+    expect(names).toContain("sevdesk_call_write");
     expect(unavailableReason(listTransactions, ctx)).toMatch(/safe mode/);
     expect(unavailableReason(reconcile, ctx)).toMatch(/safe mode/);
     expect(unavailableReason(createInvoice, ctx)).toBeUndefined();
@@ -178,7 +180,16 @@ describe("MCP tool list", () => {
     const names = listTools(ctx).map((t) => t.name);
     expect(names).not.toContain("sevdesk_create_invoice");
     expect(names).not.toContain("sevdesk_list_transactions");
-    expect(names).toContain("sevdesk_call");
+    expect(names).toContain("sevdesk_call"); // reads stay available
+    expect(names).not.toContain("sevdesk_call_write");
+  });
+
+  it("advertises sevdesk_call as read-only and sevdesk_call_write as a write", () => {
+    const { ctx } = ctxWith({ env: SAFE });
+    const byName = new Map(listTools(ctx).map((t) => [t.name, t]));
+    expect(byName.get("sevdesk_call")!.annotations.readOnlyHint).toBe(true);
+    expect(byName.get("sevdesk_call_write")!.annotations.readOnlyHint).toBe(false);
+    expect(Object.keys(call.inputSchema.properties)).toEqual(["operationId", "params"]);
   });
 });
 
@@ -209,12 +220,16 @@ describe("operation catalogue (sevdesk_list_operations / describe / call)", () =
   it.each(BLOCKED_OPERATION_IDS)("refuses to describe or call %s in safe mode", async (id) => {
     const { ctx, sent } = ctxWith({ env: SAFE });
     await expect(describeOperation.handler({ operationId: id }, ctx)).rejects.toBeInstanceOf(SafeModeError);
-    await expect(
-      call.handler({ operationId: id, params: { [anyPathParam(id)]: "1" } }, ctx),
-    ).rejects.toBeInstanceOf(SafeModeError);
+    // Refused on both call tools, whichever side the operation is on — safe
+    // mode is checked before the read/write split.
+    for (const tool of [call, callWrite]) {
+      await expect(
+        tool.handler({ operationId: id, params: { [anyPathParam(id)]: "1" } }, ctx),
+      ).rejects.toBeInstanceOf(SafeModeError);
+    }
     // Not even as a dry run.
     await expect(
-      call.handler({ operationId: id, params: { [anyPathParam(id)]: "1" }, dryRun: true }, ctx),
+      callWrite.handler({ operationId: id, params: { [anyPathParam(id)]: "1" }, dryRun: true }, ctx),
     ).rejects.toBeInstanceOf(SafeModeError);
     expect(sent).toEqual([]);
   });
@@ -228,6 +243,42 @@ describe("operation catalogue (sevdesk_list_operations / describe / call)", () =
 
   it("still serves allowed operations in safe mode", async () => {
     const { ctx, sent } = ctxWith({ env: SAFE });
+    await call.handler({ operationId: "getInvoices" }, ctx);
+    expect(sent.map((s) => s.path)).toEqual(["/Invoice"]);
+  });
+});
+
+describe("read/write split of the generic call", () => {
+  it("sevdesk_call refuses mutating operations and points at sevdesk_call_write", async () => {
+    const { ctx, sent } = ctxWith({});
+    await expect(
+      call.handler({ operationId: "createInvoiceByFactory", body: { invoice: { status: "100" } } }, ctx),
+    ).rejects.toThrow(/changes data.*sevdesk_call_write/);
+    await expect(call.handler({ operationId: "updateContact", params: { contactId: "1" } }, ctx)).rejects.toThrow(
+      /sevdesk_call_write/,
+    );
+    expect(sent).toEqual([]);
+  });
+
+  it("sevdesk_call_write refuses GET operations and points at sevdesk_call", async () => {
+    const { ctx, sent } = ctxWith({});
+    await expect(callWrite.handler({ operationId: "getInvoices" }, ctx)).rejects.toThrow(/read \(GET\).*sevdesk_call/);
+    expect(sent).toEqual([]);
+  });
+
+  it("sevdesk_call always sends non-mutating requests, with path and query params", async () => {
+    const { ctx, sent } = ctxWith({});
+    await call.handler({ operationId: "getInvoiceById", params: { invoiceId: "9", embed: "contact" } }, ctx);
+    expect(sent).toEqual([
+      { method: "GET", path: "/Invoice/9", query: { embed: "contact" }, body: undefined, mutating: false },
+    ]);
+  });
+
+  it("sevdesk_call_write honours SEVDESK_READ_ONLY per call", async () => {
+    const { ctx, sent } = ctxWith({ env: { SEVDESK_READ_ONLY: "true" } });
+    await expect(
+      callWrite.handler({ operationId: "createInvoiceByFactory", body: { invoice: { status: "100" } } }, ctx),
+    ).rejects.toThrow(/READ_ONLY/);
     await call.handler({ operationId: "getInvoices" }, ctx);
     expect(sent.map((s) => s.path)).toEqual(["/Invoice"]);
   });
@@ -361,7 +412,7 @@ describe("invoice finalization needs confirm_finalize: true", () => {
     expect(sent.filter((s) => s.method === "PUT")).toHaveLength(1);
   });
 
-  it("sevdesk_call recognises finalizing payloads", () => {
+  it("sevdesk_call_write recognises finalizing payloads", () => {
     const factory = catalog.operations.find((o) => o.operationId === "createInvoiceByFactory")!;
     const sendBy = catalog.operations.find((o) => o.operationId === "invoiceSendBy")!;
     const email = catalog.operations.find((o) => o.operationId === "sendInvoiceViaEMail")!;
@@ -375,24 +426,24 @@ describe("invoice finalization needs confirm_finalize: true", () => {
     expect(finalizeIntent(email, {})).toMatch(/finalizes/);
   });
 
-  it("sevdesk_call refuses finalizing calls without confirmation and sends them with it", async () => {
+  it("sevdesk_call_write refuses finalizing calls without confirmation and sends them with it", async () => {
     const { ctx, sent } = ctxWith({ respond: saved });
     const body = { invoice: { status: "200", contact: { id: 1 } }, invoicePosSave: [] };
     await expect(
-      call.handler({ operationId: "createInvoiceByFactory", body }, ctx),
+      callWrite.handler({ operationId: "createInvoiceByFactory", body }, ctx),
     ).rejects.toBeInstanceOf(FinalizeConfirmationError);
     await expect(
-      call.handler({ operationId: "invoiceSendBy", params: { invoiceId: "9" }, body: { sendType: "VPDF", sendDraft: false } }, ctx),
+      callWrite.handler({ operationId: "invoiceSendBy", params: { invoiceId: "9" }, body: { sendType: "VPDF", sendDraft: false } }, ctx),
     ).rejects.toBeInstanceOf(FinalizeConfirmationError);
     expect(sent).toEqual([]);
 
     // A draft payload needs nothing extra.
-    await call.handler({ operationId: "createInvoiceByFactory", body: { invoice: { status: "100" } } }, ctx);
+    await callWrite.handler({ operationId: "createInvoiceByFactory", body: { invoice: { status: "100" } } }, ctx);
     // A dry run previews and points at the requirement.
-    const preview = (await call.handler({ operationId: "createInvoiceByFactory", body, dryRun: true }, ctx)) as { note: string };
+    const preview = (await callWrite.handler({ operationId: "createInvoiceByFactory", body, dryRun: true }, ctx)) as { note: string };
     expect(preview.note).toMatch(/confirm_finalize/);
     // The confirmed call goes through.
-    await call.handler({ operationId: "createInvoiceByFactory", body, confirm_finalize: true }, ctx);
+    await callWrite.handler({ operationId: "createInvoiceByFactory", body, confirm_finalize: true }, ctx);
     expect(sent.map((s) => s.path)).toEqual(["/Invoice/Factory/saveInvoice", "/Invoice/Factory/saveInvoice"]);
   });
 });

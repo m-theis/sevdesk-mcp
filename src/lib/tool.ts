@@ -34,8 +34,8 @@ export interface ToolDef {
   mutating: boolean;
   /**
    * Keep the tool listed and callable in read-only mode even though it is
-   * declared mutating — for tools that decide per call (sevdesk_call also
-   * covers reads; its writes are still refused at the client layer).
+   * declared mutating — for tools that decide per call. Currently unused:
+   * sevdesk_call is read-only and sevdesk_call_write is a plain write tool.
    */
   listInReadOnly?: boolean;
   /**

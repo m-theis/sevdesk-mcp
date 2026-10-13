@@ -81,7 +81,7 @@ export function isFinalizedInvoiceStatus(status: unknown): boolean {
 
 /**
  * Describe how a catalogue call would finalize an invoice, or `undefined`
- * when it cannot. Used by sevdesk_call, which sees only operationId + body.
+ * when it cannot. Used by sevdesk_call_write, which sees only operationId + body.
  */
 export function finalizeIntent(
   op: { operationId: string; method: string; path: string },

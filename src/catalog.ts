@@ -95,9 +95,10 @@ export function describeOperation(op: Operation): string {
     );
   }
 
+  const tool = op.mutating ? "sevdesk_call_write" : "sevdesk_call";
   lines.push(
     "",
-    "Call it with sevdesk_call:",
+    `Call it with ${tool}:`,
     `  { "operationId": "${op.operationId}", "params": { ... }${op.body ? ', "body": { ... }' : ""} }`,
   );
   return lines.join("\n");

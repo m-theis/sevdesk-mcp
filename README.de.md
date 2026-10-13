@@ -99,9 +99,9 @@ Highlights: `sevdesk_summarize` aggregiert Rechnungen oder Belege serverseitig �
 
 ### Vollständige Abdeckung
 
-`sevdesk_list_operations` · `sevdesk_describe_operation` · `sevdesk_call`
+`sevdesk_list_operations` · `sevdesk_describe_operation` · `sevdesk_call` (lesend) · `sevdesk_call_write` (schreibend)
 
-Statt 151 Tools zu registrieren und die Tool-Liste des Clients zu fluten, liefert der Server einen durchsuchbaren Katalog, der aus sevDesks OpenAPI-Dokument generiert wird. Suchen, Signatur lesen, aufrufen — jeder Endpunkt ist erreichbar.
+Statt 151 Tools zu registrieren und die Tool-Liste des Clients zu fluten, liefert der Server einen durchsuchbaren Katalog, der aus sevDesks OpenAPI-Dokument generiert wird. Suchen, Signatur lesen, aufrufen — jeder Endpunkt ist erreichbar. Der generische Aufruf ist nach Wirkung geteilt: `sevdesk_call` führt nur GET-Operationen aus und ist als read-only gekennzeichnet, MCP-Clients können es also einmalig freigeben; `sevdesk_call_write` führt POST/PUT aus und behält die Bestätigung pro Aufruf.
 
 ## Typische Arbeitsabläufe
 
@@ -132,7 +132,7 @@ des Servers und die Tool-Beschreibungen tragen das Wesentliche.
 | Variable | Standard | Zweck |
 |---|---|---|
 | `SEVDESK_API_TOKEN` | *(erforderlich)* | Dein sevDesk-API-Token |
-| `SEVDESK_READ_ONLY` | `false` | Blendet Schreib-Tools aus; `sevdesk_call` bleibt sichtbar, verweigert aber schreibende Operationen beim Aufruf |
+| `SEVDESK_READ_ONLY` | `false` | Blendet Schreib-Tools aus (auch `sevdesk_call_write`); `sevdesk_call` bleibt für Lesezugriffe sichtbar |
 | `SEVDESK_DRY_RUN` | `false` | Zeigt, was ein Schreibzugriff senden *würde*, ohne zu senden |
 | `SEVDESK_SAFE_MODE` | `true` | Safe-Mode (Snapp-X-Fork): blendet Bankkonten, `DELETE`, Rechnung stornieren/mailen/buchen und Beleg buchen/festschreiben aus und lehnt sie ab. Nur ein explizites `false` schaltet ab. Siehe [Snapp X fork: safe mode](#snapp-x-fork-safe-mode) |
 | `SEVDESK_VAT_REGIME` | `auto` | `regular`, `kleinunternehmer` (§19 UStG) oder `auto`. `auto` erkennt das Regime aus den letzten Rechnungen; `sevdesk_ping` zeigt Ergebnis und Begründung. Steuerregel-Defaults und Prüfungs-Empfehlungen folgen dem Regime. Ein expliziter Wert, der dem Buchungsbestand widerspricht, wird als Prüfungs-Finding gemeldet — nie stillschweigend übernommen |
@@ -203,7 +203,7 @@ unabhängig vom Safe-Mode:
 
 - `sevdesk_create_invoice` mit `status: "200"`
 - `sevdesk_mark_invoice_sent` auf einem Entwurf (`sendBy` finalisiert ihn)
-- `sevdesk_call` mit `createInvoiceByFactory` und Status ≥ 200, `invoiceSendBy`
+- `sevdesk_call_write` mit `createInvoiceByFactory` und Status ≥ 200, `invoiceSendBy`
   ohne `sendDraft: true` oder `sendInvoiceViaEMail`
 
 Ohne Bestätigung scheitert der Aufruf, bevor etwas gesendet wird. Ein `dryRun`

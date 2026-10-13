@@ -80,7 +80,7 @@ const describeOperationTool: ToolDef = {
   title: "Describe a sevDesk API operation",
   description:
     "Show the full parameter list, request-body shape and an example call for one " +
-    "operationId. Always do this before sevdesk_call on an operation you have not used before.",
+    "operationId. Always do this before sevdesk_call / sevdesk_call_write on an operation you have not used before.",
   mutating: false,
   inputSchema: {
     type: "object",
@@ -106,25 +106,110 @@ const describeOperationTool: ToolDef = {
   },
 };
 
+/**
+ * Look an operationId up, refuse it in safe mode, and check it is on the
+ * right side of the read/write split. Shared by both call tools.
+ */
+function resolveOperation(args: Record<string, unknown>, ctx: ToolContext, write: boolean): Operation {
+  const id = requireString(args, "operationId");
+  const op = findOperation(id);
+  if (!op) {
+    const near = searchOperations({ query: id, limit: 8, exclude: hiddenInSafeMode(ctx) }).map(
+      (o) => o.operationId,
+    );
+    throw new Error(
+      `Unknown operationId '${id}'.` + (near.length ? ` Did you mean: ${near.join(", ")}?` : ""),
+    );
+  }
+  // Safe mode first — a blocked operation is refused even as a dry run.
+  assertAllowedInSafeMode(op, ctx);
+  if (op.mutating && !write) {
+    throw new Error(
+      `'${op.operationId}' is a ${op.method} operation that changes data — call it with sevdesk_call_write, ` +
+        `not sevdesk_call (reads only).`,
+    );
+  }
+  if (!op.mutating && write) {
+    throw new Error(`'${op.operationId}' is a read (GET) operation — call it with sevdesk_call, not sevdesk_call_write.`);
+  }
+  return op;
+}
+
+/** Split `params` into the path parameters the operation declares and the rest (query). */
+function splitParams(op: Operation, params: Record<string, unknown>): { filledPath: string; query: Record<string, unknown> } {
+  const pathParamNames = new Set(op.params.filter((p) => p.in === "path").map((p) => p.name));
+  const missing = [...pathParamNames].filter(
+    (n) => params[n] === undefined || params[n] === null || params[n] === "",
+  );
+  if (missing.length) {
+    throw new Error(
+      `Missing path parameter(s) ${missing.join(", ")} for ${op.operationId}. ` +
+        `Run sevdesk_describe_operation for the full signature.`,
+    );
+  }
+  const filledPath = SevdeskClient.fillPath(op.path, params);
+  const query: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (!pathParamNames.has(k)) query[k] = v;
+  }
+  return { filledPath, query };
+}
+
+/**
+ * Reads only. Declared non-mutating so MCP clients can auto-approve it: a
+ * GET through here can never change data, and every mutating operationId
+ * is refused before the client layer is reached.
+ */
 const callOperation: ToolDef = {
   name: "sevdesk_call",
-  title: "Call any sevDesk API operation",
+  title: "Call any read (GET) sevDesk API operation",
   description:
-    "Execute any operation from the catalogue. Path parameters are taken from `params` " +
+    "Execute any READ (GET) operation from the catalogue. Path parameters are taken from `params` " +
     "by name; remaining `params` entries become query parameters. Nested objects are " +
-    "encoded in sevDesk's bracket syntax (a[b]=c). Mutating operations are refused when " +
-    "the server runs with SEVDESK_READ_ONLY=true, and are only described (not sent) when " +
-    "SEVDESK_DRY_RUN=true or `dryRun` is passed. In safe mode (default) bank-account, DELETE, " +
-    "invoice cancel/email/bookAmount and voucher book/enshrine operations are refused. Calls " +
-    "that finalize an invoice (status 100 → 200) require confirm_finalize: true.",
-  mutating: true, // conservatively declared; the handler checks per operation
-  listInReadOnly: true, // covers reads too — writes are refused per call below
+    "encoded in sevDesk's bracket syntax (a[b]=c). Mutating operations are refused here — " +
+    "use sevdesk_call_write for POST/PUT. In safe mode (default) bank-account operations " +
+    "are refused.",
+  mutating: false,
   inputSchema: {
     type: "object",
     properties: {
-      operationId: str("Exact operationId from sevdesk_list_operations."),
+      operationId: str("Exact operationId of a GET operation, from sevdesk_list_operations."),
       params: obj("Path and query parameters, keyed by parameter name."),
-      body: obj("JSON request body, for POST/PUT operations."),
+    },
+    required: ["operationId"],
+    additionalProperties: false,
+  },
+  async handler(args, ctx) {
+    const op = resolveOperation(args, ctx, false);
+    const { filledPath, query } = splitParams(op, (args.params ?? {}) as Record<string, unknown>);
+    const result = await ctx.client.request({
+      method: op.method,
+      path: filledPath,
+      query: Object.keys(query).length ? query : undefined,
+      mutating: false,
+    });
+    return { status: result.status, data: result.data };
+  },
+};
+
+const callWriteOperation: ToolDef = {
+  name: "sevdesk_call_write",
+  title: "Call any write (POST/PUT) sevDesk API operation",
+  description:
+    "Execute any WRITE (POST/PUT) operation from the catalogue. Path parameters are taken from " +
+    "`params` by name; remaining `params` entries become query parameters; `body` is the JSON " +
+    "request body. Refused when the server runs with SEVDESK_READ_ONLY=true, and only described " +
+    "(not sent) when SEVDESK_DRY_RUN=true or `dryRun` is passed. In safe mode (default) " +
+    "DELETE, bank-account, invoice cancel/email/bookAmount and voucher book/enshrine operations " +
+    "are refused. Calls that finalize an invoice (status 100 → 200) require confirm_finalize: true. " +
+    "Reads belong in sevdesk_call.",
+  mutating: true,
+  inputSchema: {
+    type: "object",
+    properties: {
+      operationId: str("Exact operationId of a POST/PUT operation, from sevdesk_list_operations."),
+      params: obj("Path and query parameters, keyed by parameter name."),
+      body: obj("JSON request body."),
       dryRun: bool("Describe the request that would be sent instead of sending it."),
       confirm_finalize: CONFIRM_FINALIZE_SCHEMA,
     },
@@ -132,48 +217,17 @@ const callOperation: ToolDef = {
     additionalProperties: false,
   },
   async handler(args, ctx) {
-    const id = requireString(args, "operationId");
-    const op = findOperation(id);
-    if (!op) {
-      const near = searchOperations({ query: id, limit: 8, exclude: hiddenInSafeMode(ctx) }).map(
-        (o) => o.operationId,
-      );
-      throw new Error(
-        `Unknown operationId '${id}'.` + (near.length ? ` Did you mean: ${near.join(", ")}?` : ""),
-      );
-    }
-    // Safe mode first — a blocked operation is refused even as a dry run.
-    assertAllowedInSafeMode(op, ctx);
+    const op = resolveOperation(args, ctx, true);
+    if (ctx.config.readOnly) throw new ReadOnlyError(op.operationId);
 
-    const params = (args.params ?? {}) as Record<string, unknown>;
     const body = args.body;
-
-    if (op.mutating && ctx.config.readOnly) throw new ReadOnlyError(op.operationId);
-
     // Finalizing an invoice needs the user's explicit go-ahead. A dry run
     // sends nothing, so it may preview without it — and says so.
     const finalizing = finalizeIntent(op, body);
-    const dry = isDryRun(args, ctx) && op.mutating;
+    const dry = isDryRun(args, ctx);
     if (finalizing && !dry) requireFinalizeConfirmation(args, finalizing);
 
-    const pathParamNames = new Set(
-      op.params.filter((p) => p.in === "path").map((p) => p.name),
-    );
-    const missing = [...pathParamNames].filter(
-      (n) => params[n] === undefined || params[n] === null || params[n] === "",
-    );
-    if (missing.length) {
-      throw new Error(
-        `Missing path parameter(s) ${missing.join(", ")} for ${op.operationId}. ` +
-          `Run sevdesk_describe_operation for the full signature.`,
-      );
-    }
-
-    const filledPath = SevdeskClient.fillPath(op.path, params);
-    const query: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(params)) {
-      if (!pathParamNames.has(k)) query[k] = v;
-    }
+    const { filledPath, query } = splitParams(op, (args.params ?? {}) as Record<string, unknown>);
 
     if (dry) {
       return {
@@ -195,7 +249,7 @@ const callOperation: ToolDef = {
       path: filledPath,
       query: Object.keys(query).length ? query : undefined,
       body,
-      mutating: op.mutating,
+      mutating: true,
     });
     return { status: result.status, data: result.data };
   },
@@ -216,4 +270,5 @@ export const discoveryTools: ToolDef[] = [
   listOperations,
   describeOperationTool,
   callOperation,
+  callWriteOperation,
 ];

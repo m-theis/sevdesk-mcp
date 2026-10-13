@@ -89,6 +89,6 @@ Run in this order; each step's output feeds the next conversation turn:
 - Always pass `from`/`to` periods and `limit` — unbounded sweeps are the
   main token sink.
 - `sevdesk_list_operations` / `sevdesk_describe_operation` before
-  `sevdesk_call`: discover precisely, then call once.
+  `sevdesk_call` (GET) / `sevdesk_call_write` (POST/PUT): discover precisely, then call once.
 - Audit tools return complete result objects — summarize for the user
   instead of re-fetching what they already contain.

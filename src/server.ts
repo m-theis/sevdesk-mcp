@@ -72,7 +72,7 @@ export function buildServer(ctx: ToolContext): Server {
         `Start with sevdesk_ping: it verifies the token and reports the account's ` +
         `bookkeeping generation and detected VAT regime (regular vs §19 Kleinunternehmer) ` +
         `with evidence — tax defaults and audit advice follow that regime. ` +
-        `Prefer the curated sevdesk_* tools; for anything else use sevdesk_call after ` +
+        `Prefer the curated sevdesk_* tools; for anything else use sevdesk_call (reads) or sevdesk_call_write (writes) after ` +
         `sevdesk_list_operations / sevdesk_describe_operation. Every write accepts ` +
         `dryRun:true for a preview. Dates are yyyy-mm-dd; amounts EUR unless stated.`,
       // The tool list is fixed for the lifetime of the process (read-only and

@@ -548,7 +548,7 @@ const createVoucher: ToolDef = {
     "Create a voucher via /Voucher/Factory/saveVoucher. Defaults to status 50 (Entwurf) so " +
     "nothing is booked without you reviewing it in sevDesk. Check sevdesk_receipt_guidance " +
     "for the account's allowed tax rules first — expense-side reverse charge is 12/13/14, " +
-    "not 5. WRITE operation. For anything this wrapper does not cover, use sevdesk_call " +
+    "not 5. WRITE operation. For anything this wrapper does not cover, use sevdesk_call_write " +
     "with operationId 'voucherFactorySaveVoucher'.",
   mutating: true,
   inputSchema: {

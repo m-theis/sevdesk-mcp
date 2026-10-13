@@ -99,9 +99,9 @@ Highlights: `sevdesk_summarize` aggregates invoices or vouchers server-side — 
 
 ### Full coverage
 
-`sevdesk_list_operations` · `sevdesk_describe_operation` · `sevdesk_call`
+`sevdesk_list_operations` · `sevdesk_describe_operation` · `sevdesk_call` (reads) · `sevdesk_call_write` (writes)
 
-Rather than registering 151 tools and swamping the client's tool list, the server ships a searchable catalogue generated from sevDesk's OpenAPI document. Search for what you need, read its signature, call it. Every endpoint is reachable.
+Rather than registering 151 tools and swamping the client's tool list, the server ships a searchable catalogue generated from sevDesk's OpenAPI document. Search for what you need, read its signature, call it. Every endpoint is reachable. The generic caller is split by effect: `sevdesk_call` only runs GET operations and is advertised read-only, so MCP clients can approve it once; `sevdesk_call_write` runs POST/PUT and keeps the per-call confirmation.
 
 ## Common workflows
 
@@ -135,7 +135,7 @@ essentials.
 | Variable | Default | Purpose |
 |---|---|---|
 | `SEVDESK_API_TOKEN` | *(required)* | Your sevDesk API token |
-| `SEVDESK_READ_ONLY` | `false` | Hide write tools; `sevdesk_call` stays listed but refuses mutating operations at call time |
+| `SEVDESK_READ_ONLY` | `false` | Hide write tools (including `sevdesk_call_write`); `sevdesk_call` stays listed for reads |
 | `SEVDESK_DRY_RUN` | `false` | Show what a write *would* send, without sending it |
 | `SEVDESK_SAFE_MODE` | `true` | Safe mode (Snapp X fork): hides and refuses bank-account, DELETE, invoice cancel/email/bookAmount and voucher book/enshrine operations. Only an explicit `false` switches it off. See [Snapp X fork: safe mode](#snapp-x-fork-safe-mode) |
 | `SEVDESK_VAT_REGIME` | `auto` | `regular`, `kleinunternehmer` (§19 UStG) or `auto`. `auto` infers the regime from your recent invoices; `sevdesk_ping` reports what was detected and why. Tax-rule defaults and audit suggestions follow the regime. An explicit value that contradicts the ledger is reported as an audit finding, never silently trusted |
@@ -204,7 +204,7 @@ unabhängig vom Safe-Mode:
 
 - `sevdesk_create_invoice` mit `status: "200"`
 - `sevdesk_mark_invoice_sent` auf einem Entwurf (`sendBy` finalisiert ihn)
-- `sevdesk_call` mit `createInvoiceByFactory` und Status ≥ 200, `invoiceSendBy`
+- `sevdesk_call_write` mit `createInvoiceByFactory` und Status ≥ 200, `invoiceSendBy`
   ohne `sendDraft: true` oder `sendInvoiceViaEMail`
 
 Ohne Bestätigung scheitert der Aufruf, bevor etwas gesendet wird. Ein `dryRun`
