@@ -1,0 +1,5 @@
+Upstream:   https://github.com/joosthel/sevdesk-mcp (git remote "upstream")
+Fork:       https://github.com/m-theis/sevdesk-mcp (git remote "origin")
+Base:       307158e  "Add optional .env support for runs outside an MCP client"  (upstream main, 2026-10-13)
+Purpose:    Snapp X: locked-down sevDesk MCP so Claude creates invoices as drafts only.
+            See README section "Snapp X fork: safe mode".

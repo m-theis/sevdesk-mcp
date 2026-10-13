@@ -7,7 +7,7 @@ import { loadConfig } from "./config.js";
 import { loadDotEnv } from "./lib/env.js";
 import { createProfileResolver } from "./lib/profile.js";
 import type { ToolContext } from "./lib/tool.js";
-import { VERSION, buildServer, tools } from "./server.js";
+import { VERSION, buildServer, listTools } from "./server.js";
 
 async function main(): Promise<void> {
   // A .env beside package.json is a convenience for runs outside an MCP
@@ -30,9 +30,10 @@ async function main(): Promise<void> {
 
   // stderr only — stdout carries the MCP protocol.
   console.error(
-    `sevdesk-mcp ${VERSION} ready · ${tools.length} tools · ` +
+    `sevdesk-mcp ${VERSION} ready · ${listTools(ctx).length} tools · ` +
       `${catalog.operationCount} API operations · ` +
       `mode: ${config.readOnly ? "READ-ONLY" : config.dryRun ? "DRY-RUN" : "read/write"}` +
+      ` · safe mode: ${config.safeMode ? "on" : "OFF"}` +
       (envFile ? ` · loaded ${envFile}` : ""),
   );
 }

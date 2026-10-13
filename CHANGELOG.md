@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Snapp X fork: safe mode
+
+- **Host allowlist.** Every outgoing request must target `https://my.sevdesk.de`
+  (exact host, HTTPS, default port, no credentials in the URL). Checked in the
+  HTTP client right before `fetch` and again when the configuration loads — a
+  foreign `SEVDESK_BASE_URL` refuses to start. Not configurable; the token
+  leaves the process only towards sevDesk (`src/lib/host-guard.ts`).
+- **Safe mode** (`SEVDESK_SAFE_MODE`, default on; only an explicit `false`
+  switches it off). Hidden from the tool list and the operation catalogue and
+  refused on call — also as `dryRun`, also from a stale cached tool list — and
+  refused once more inside the HTTP client: everything under `/CheckAccount`
+  and `/CheckAccountTransaction` (reads included; affects
+  `sevdesk_list_transactions` and `sevdesk_reconcile_transactions`), every
+  `DELETE` endpoint, invoice `cancelInvoice` / `sendViaEmail` / `bookAmount`,
+  voucher `bookAmount` / `enshrine` (`src/lib/safe-mode.ts`).
+- **Finalizing needs `confirm_finalize: true`** (independent of safe mode):
+  `sevdesk_create_invoice` with `status: "200"` (new parameter, default `100`),
+  `sevdesk_mark_invoice_sent` on a draft, and `sevdesk_call` with
+  `createInvoiceByFactory` at status ≥ 200, `invoiceSendBy` without
+  `sendDraft: true`, or `sendInvoiceViaEMail`. Dry runs preview and point at
+  the requirement.
+- **`sevdesk_draft_invoice`**: one-call invoice draft that requires
+  `contactId`, `invoiceDate`, `deliveryDate`/`deliveryDateUntil` (service
+  period), `taxRule` and positions with `name`, `text`, `quantity`, `unity`,
+  `price`, `taxRate`; optional `header`, `headText`, `footText`,
+  `customerInternalNote`, `paymentTerms` (days → `timeToPay`). `unity` is a
+  Unity id or a unit name resolved via `GET /Unity`. Returns draft id,
+  net/tax/gross sums and the service period. Always status 100.
+- Server listing and dispatch share one availability rule (`unavailableReason`),
+  startup line and server instructions report the safe-mode state,
+  `sevdesk_list_operations` gained a runtime `exclude` hook (the catalogue
+  build from the OpenAPI spec is unchanged).
+
 - Optional `.env` support for runs outside an MCP client: a `.env` beside
   `package.json` is read at startup, so `npm run dev` and
   `node dist/index.js` no longer need the token pasted onto the command

@@ -16,10 +16,12 @@ export interface SearchOptions {
   /** "read" = GET only, "write" = everything else, "all" = no filter. */
   kind?: "read" | "write" | "all";
   limit?: number;
+  /** Drop operations the caller may not see (safe mode); applied before `limit`. */
+  exclude?: (op: Operation) => boolean;
 }
 
 export function searchOperations(opts: SearchOptions = {}): Operation[] {
-  const { query, tag, kind = "all", limit = 60 } = opts;
+  const { query, tag, kind = "all", limit = 60, exclude } = opts;
   const needles = (query ?? "")
     .toLowerCase()
     .split(/\s+/)
@@ -28,6 +30,7 @@ export function searchOperations(opts: SearchOptions = {}): Operation[] {
   const scored: Array<{ op: Operation; score: number }> = [];
 
   for (const op of catalog.operations) {
+    if (exclude?.(op)) continue;
     if (tag && !op.tags.some((t) => t.toLowerCase() === tag.toLowerCase())) continue;
     if (kind === "read" && op.mutating) continue;
     if (kind === "write" && !op.mutating) continue;

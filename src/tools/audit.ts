@@ -1031,8 +1031,10 @@ const reconcileTransactions: ToolDef = {
   description:
     "Match bank transactions against vouchers by amount and date proximity, in both directions: " +
     "payments with no plausible voucher (missing receipts) and non-draft vouchers no payment " +
-    "covers. Matching is a heuristic — treat the result as a checklist, not a verdict. Read-only.",
+    "covers. Matching is a heuristic — treat the result as a checklist, not a verdict. Read-only. " +
+    "Not available in safe mode (default) — it reads bank transactions.",
   mutating: false,
+  blockedInSafeMode: true,
   inputSchema: {
     type: "object",
     properties: {

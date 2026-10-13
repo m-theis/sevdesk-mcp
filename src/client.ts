@@ -1,4 +1,6 @@
+import { assertAllowedUrl } from "./lib/host-guard.js";
 import { RateLimiter } from "./lib/rate-limiter.js";
+import { SafeModeError, safeModeBlockReason } from "./lib/safe-mode.js";
 import { ReadOnlyError, type Config } from "./config.js";
 
 export interface RequestOptions {
@@ -146,9 +148,19 @@ export class SevdeskClient {
     if (mutating && this.config.readOnly) {
       throw new ReadOnlyError(`${opts.method} ${opts.path}`);
     }
+    // Safe mode, last line: the tool layer hides and refuses these already,
+    // but a path assembled by any tool still has to pass here.
+    if (this.config.safeMode) {
+      const reason = safeModeBlockReason({ method: opts.method, path: opts.path });
+      if (reason) throw new SafeModeError(`${opts.method.toUpperCase()} ${opts.path}`, reason);
+    }
 
     const qs = opts.query ? encodeQuery(opts.query) : "";
     const url = `${this.config.baseUrl}${opts.path}${qs ? `?${qs}` : ""}`;
+    // Host allowlist: the token leaves this process only towards sevDesk.
+    // Checked on the final URL, per request, right before the transport —
+    // not configurable, see lib/host-guard.ts.
+    assertAllowedUrl(url);
 
     const headers: Record<string, string> = {
       Authorization: this.config.apiToken,

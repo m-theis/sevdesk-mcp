@@ -1,4 +1,5 @@
 import {
+  type Operation,
   briefOperation,
   catalog,
   describeOperation,
@@ -7,7 +8,15 @@ import {
 } from "../catalog.js";
 import { SevdeskClient } from "../client.js";
 import { ReadOnlyError } from "../config.js";
-import { bool, isDryRun, obj, optNumber, optString, requireString, str, type ToolDef } from "../lib/tool.js";
+import {
+  CONFIRM_FINALIZE_SCHEMA,
+  SafeModeError,
+  finalizeIntent,
+  isBlockedInSafeMode,
+  requireFinalizeConfirmation,
+  safeModeBlockReason,
+} from "../lib/safe-mode.js";
+import { bool, isDryRun, obj, optNumber, optString, requireString, str, type ToolContext, type ToolDef } from "../lib/tool.js";
 
 /**
  * Three tools that together expose the *entire* sevDesk API.
@@ -39,7 +48,7 @@ const listOperations: ToolDef = {
     },
     additionalProperties: false,
   },
-  async handler(args) {
+  async handler(args, ctx) {
     const kindRaw = optString(args, "kind");
     const kind = kindRaw === "read" || kindRaw === "write" ? kindRaw : "all";
     const ops = searchOperations({
@@ -47,11 +56,16 @@ const listOperations: ToolDef = {
       tag: optString(args, "tag"),
       kind,
       limit: optNumber(args, "limit") ?? 60,
+      exclude: hiddenInSafeMode(ctx),
     });
     if (ops.length === 0) {
       return {
         matches: 0,
-        hint: `No operation matched. Known tags: ${catalog.tags.join(", ")}`,
+        hint:
+          `No operation matched. Known tags: ${catalog.tags.join(", ")}` +
+          (ctx.config.safeMode
+            ? ". Safe mode is on: CheckAccount*, DELETE and invoice cancel/email/book, voucher book/enshrine operations are not listed."
+            : ""),
       };
     }
     return {
@@ -76,15 +90,18 @@ const describeOperationTool: ToolDef = {
     required: ["operationId"],
     additionalProperties: false,
   },
-  async handler(args) {
+  async handler(args, ctx) {
     const id = requireString(args, "operationId");
     const op = findOperation(id);
     if (!op) {
-      const near = searchOperations({ query: id, limit: 8 }).map((o) => o.operationId);
+      const near = searchOperations({ query: id, limit: 8, exclude: hiddenInSafeMode(ctx) }).map(
+        (o) => o.operationId,
+      );
       throw new Error(
         `Unknown operationId '${id}'.` + (near.length ? ` Did you mean: ${near.join(", ")}?` : ""),
       );
     }
+    assertAllowedInSafeMode(op, ctx);
     return describeOperation(op);
   },
 };
@@ -97,7 +114,9 @@ const callOperation: ToolDef = {
     "by name; remaining `params` entries become query parameters. Nested objects are " +
     "encoded in sevDesk's bracket syntax (a[b]=c). Mutating operations are refused when " +
     "the server runs with SEVDESK_READ_ONLY=true, and are only described (not sent) when " +
-    "SEVDESK_DRY_RUN=true or `dryRun` is passed.",
+    "SEVDESK_DRY_RUN=true or `dryRun` is passed. In safe mode (default) bank-account, DELETE, " +
+    "invoice cancel/email/bookAmount and voucher book/enshrine operations are refused. Calls " +
+    "that finalize an invoice (status 100 → 200) require confirm_finalize: true.",
   mutating: true, // conservatively declared; the handler checks per operation
   listInReadOnly: true, // covers reads too — writes are refused per call below
   inputSchema: {
@@ -107,6 +126,7 @@ const callOperation: ToolDef = {
       params: obj("Path and query parameters, keyed by parameter name."),
       body: obj("JSON request body, for POST/PUT operations."),
       dryRun: bool("Describe the request that would be sent instead of sending it."),
+      confirm_finalize: CONFIRM_FINALIZE_SCHEMA,
     },
     required: ["operationId"],
     additionalProperties: false,
@@ -115,16 +135,26 @@ const callOperation: ToolDef = {
     const id = requireString(args, "operationId");
     const op = findOperation(id);
     if (!op) {
-      const near = searchOperations({ query: id, limit: 8 }).map((o) => o.operationId);
+      const near = searchOperations({ query: id, limit: 8, exclude: hiddenInSafeMode(ctx) }).map(
+        (o) => o.operationId,
+      );
       throw new Error(
         `Unknown operationId '${id}'.` + (near.length ? ` Did you mean: ${near.join(", ")}?` : ""),
       );
     }
+    // Safe mode first — a blocked operation is refused even as a dry run.
+    assertAllowedInSafeMode(op, ctx);
 
     const params = (args.params ?? {}) as Record<string, unknown>;
     const body = args.body;
 
     if (op.mutating && ctx.config.readOnly) throw new ReadOnlyError(op.operationId);
+
+    // Finalizing an invoice needs the user's explicit go-ahead. A dry run
+    // sends nothing, so it may preview without it — and says so.
+    const finalizing = finalizeIntent(op, body);
+    const dry = isDryRun(args, ctx) && op.mutating;
+    if (finalizing && !dry) requireFinalizeConfirmation(args, finalizing);
 
     const pathParamNames = new Set(
       op.params.filter((p) => p.in === "path").map((p) => p.name),
@@ -145,7 +175,7 @@ const callOperation: ToolDef = {
       if (!pathParamNames.has(k)) query[k] = v;
     }
 
-    if (isDryRun(args, ctx) && op.mutating) {
+    if (dry) {
       return {
         dryRun: true,
         wouldSend: {
@@ -154,7 +184,9 @@ const callOperation: ToolDef = {
           query,
           body: body ?? null,
         },
-        note: "Nothing was sent. Call again without dryRun to execute.",
+        note:
+          "Nothing was sent. Call again without dryRun to execute." +
+          (finalizing ? ` The real call ${finalizing} and requires confirm_finalize: true.` : ""),
       };
     }
 
@@ -168,6 +200,17 @@ const callOperation: ToolDef = {
     return { status: result.status, data: result.data };
   },
 };
+
+/** Search filter: in safe mode, blocked operations do not exist for the caller. */
+function hiddenInSafeMode(ctx: ToolContext): ((op: Operation) => boolean) | undefined {
+  return ctx.config.safeMode ? (op) => isBlockedInSafeMode(op) : undefined;
+}
+
+function assertAllowedInSafeMode(op: Operation, ctx: ToolContext): void {
+  if (!ctx.config.safeMode) return;
+  const reason = safeModeBlockReason(op);
+  if (reason) throw new SafeModeError(op.operationId, reason);
+}
 
 export const discoveryTools: ToolDef[] = [
   listOperations,
