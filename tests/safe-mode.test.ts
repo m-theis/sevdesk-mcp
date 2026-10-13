@@ -86,6 +86,7 @@ function ctxWith(opts: {
       return opts.respond?.(req) ?? { status: 200, data: { objects: [] } };
     },
     async getAll(path: string) {
+      if (path === "/SevUser") return [{ id: "1340649", fullname: "Test User" }]; // not a call under test
       sent.push({ method: "GET", path });
       return [];
     },

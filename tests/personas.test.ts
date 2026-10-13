@@ -32,6 +32,7 @@ function personaCtx(opts: {
     async getAll(path: string): Promise<Row[]> {
       if (path === "/Invoice") return opts.invoices ?? [];
       if (path === "/Voucher") return opts.vouchers ?? [];
+      if (path === "/SevUser") return [{ id: "1340649", fullname: "Test User" }];
       return [];
     },
     async request(req: { method: string; path: string; body?: unknown; query?: Row }) {

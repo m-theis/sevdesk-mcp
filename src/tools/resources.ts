@@ -828,6 +828,10 @@ const createInvoice: ToolDef = {
         enum: ["1", "2", "3", "4", "5", "11", "17", "18", "19", "20", "21"],
       }),
       currency: str("Currency (default EUR)."),
+      contactPersonId: str(
+        "SevUser id shown as contact person on the invoice (sevDesk requires one). " +
+          "Default: the account's only user; with several users this must be given.",
+      ),
       status: str(
         "100 = Entwurf/draft (default). 200 = offen/open: finalizes the invoice at once — " +
           "invoice number assigned, legally binding — and requires confirm_finalize: true.",
@@ -876,6 +880,7 @@ const createInvoice: ToolDef = {
     const defaultRate =
       rule.allowedRates === null ? null : (rule.allowedRates as readonly number[]).includes(19) ? 19 : 0;
     const date = optString(args, "invoiceDate") ?? ymd(new Date());
+    const contactPersonId = await resolveContactPersonId(ctx, optString(args, "contactPersonId"));
 
     const invoicePosSave = positions.map((p, i) => {
       const quantity = p.quantity === undefined ? 1 : num(p.quantity);
@@ -912,6 +917,7 @@ const createInvoice: ToolDef = {
         invoiceType: "RE",
         currency: optString(args, "currency") ?? "EUR",
         contact: { id: Number(contactId), objectName: "Contact" },
+        contactPerson: { id: contactPersonId, objectName: "SevUser" },
         taxRule: { id: ruleId, objectName: "TaxRule" },
         taxRate: defaultRate ?? num(invoicePosSave[0]?.taxRate),
         taxText:
@@ -971,6 +977,50 @@ function requireYmd(args: Record<string, unknown>, key: string): string {
     throw new Error(`'${key}' must be a valid date in yyyy-mm-dd format, got '${v}'.`);
   }
   return v;
+}
+
+type SevUserRow = { id: unknown; fullname?: unknown; username?: unknown; email?: unknown };
+/** One /SevUser lookup per client, shared by all invoice tools. */
+const sevUserCache = new WeakMap<object, Promise<SevUserRow[]>>();
+
+/**
+ * sevDesk requires `contactPerson` (a SevUser) on every invoice; the
+ * Factory endpoint answers 400 without it. An explicit `contactPersonId`
+ * wins. Otherwise the account's users are listed once per process
+ * (GET /SevUser — present in the API, absent from the OpenAPI spec): a
+ * single user is used as is; several users must be chosen explicitly,
+ * because the token does not reveal which user it belongs to.
+ */
+async function resolveContactPersonId(ctx: ToolContext, explicit: string | undefined): Promise<number> {
+  if (explicit !== undefined) {
+    if (!/^\d+$/.test(explicit)) throw new Error("'contactPersonId' must be a numeric SevUser id.");
+    return Number(explicit);
+  }
+  let pending = sevUserCache.get(ctx.client);
+  if (!pending) {
+    pending = ctx.client.getAll<SevUserRow>("/SevUser", {}, { maxItems: 200 });
+    sevUserCache.set(ctx.client, pending);
+    pending.catch(() => sevUserCache.delete(ctx.client));
+  }
+  let users: SevUserRow[];
+  try {
+    users = await pending;
+  } catch (err) {
+    throw new Error(
+      `Cannot determine the invoice's contact person: GET /SevUser failed ` +
+        `(${err instanceof Error ? err.message : String(err)}). Pass contactPersonId (a SevUser id) explicitly.`,
+    );
+  }
+  const ids = users.map((u) => String(u.id ?? "")).filter((id) => /^\d+$/.test(id));
+  if (ids.length === 1) return Number(ids[0]);
+  const list = users
+    .map((u) => `${String(u.fullname ?? u.username ?? u.email ?? "?")} (${String(u.id ?? "?")})`)
+    .join(", ");
+  throw new Error(
+    ids.length === 0
+      ? "Cannot determine the invoice's contact person: GET /SevUser returned no users. Pass contactPersonId explicitly."
+      : `The account has ${ids.length} users; pass contactPersonId to choose who appears as contact person on the invoice: ${list}.`,
+  );
 }
 
 type UnityRow = { id: unknown; name?: unknown; translationCode?: unknown };
@@ -1065,6 +1115,10 @@ const draftInvoice: ToolDef = {
       footText: str("Text below the positions, e.g. payment instructions (HTML allowed)."),
       customerInternalNote: str("Internal note, not printed."),
       paymentTerms: { type: "integer", description: "Payment term in days (sevDesk timeToPay).", minimum: 0 },
+      contactPersonId: str(
+        "SevUser id shown as contact person on the invoice (sevDesk requires one). " +
+          "Default: the account's only user; with several users this must be given.",
+      ),
       currency: str("Currency (default EUR)."),
       dryRun: bool("Preview the request without sending it."),
     },
@@ -1149,6 +1203,7 @@ const draftInvoice: ToolDef = {
     if (paymentTerms !== undefined && (!Number.isInteger(paymentTerms) || paymentTerms < 0)) {
       throw new Error("'paymentTerms' must be a non-negative whole number of days.");
     }
+    const contactPersonId = await resolveContactPersonId(ctx, optString(args, "contactPersonId"));
 
     const body = {
       invoice: {
@@ -1163,6 +1218,7 @@ const draftInvoice: ToolDef = {
         invoiceType: "RE",
         currency: optString(args, "currency") ?? "EUR",
         contact: { id: Number(contactId), objectName: "Contact" },
+        contactPerson: { id: contactPersonId, objectName: "SevUser" },
         taxRule: { id: ruleId, objectName: "TaxRule" },
         taxRate: headerRate,
         taxText,

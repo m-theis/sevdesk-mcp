@@ -215,7 +215,9 @@ Legt eine Rechnung mit Positionen als Entwurf an und verlangt alles, was eine
 korrekte Rechnung braucht: `contactId`, `invoiceDate`, Leistungszeitraum
 (`deliveryDate` bis `deliveryDateUntil`), `taxRule` und je Position `name`,
 `text`, `quantity`, `unity`, `price`, `taxRate`. Optional: `header`, `headText`,
-`footText`, `customerInternalNote`, `paymentTerms` (Tage). `unity` nimmt die
+`footText`, `customerInternalNote`, `paymentTerms` (Tage), `contactPersonId` (SevUser als
+Ansprechpartner; sevDesk verlangt einen — bei genau einem Nutzer im Konto automatisch,
+sonst Pflicht). `unity` nimmt die
 Unity-ID oder einen Einheitennamen des Kontos („Std", „Stück"), der über
 `GET /Unity` aufgelöst wird. Die Antwort enthält Entwurfs-ID, Netto/Steuer/Brutto
 und den Leistungszeitraum. Der Status ist immer 100; Finalisieren ist ein

@@ -223,6 +223,9 @@ function invoiceCtx(
 ) {
   const sent: Array<{ method: string; path: string; body?: unknown; query?: unknown }> = [];
   const client = {
+    async getAll(path: string): Promise<Row[]> {
+      return path === "/SevUser" ? [{ id: "1340649", fullname: "Test User" }] : [];
+    },
     async request(req: {
       method: string;
       path: string;

@@ -30,6 +30,11 @@
   `customerInternalNote`, `paymentTerms` (days → `timeToPay`). `unity` is a
   Unity id or a unit name resolved via `GET /Unity`. Returns draft id,
   net/tax/gross sums and the service period. Always status 100.
+- Fix: sevDesk requires `contactPerson` (a SevUser) on every invoice and
+  answered 400 to `sevdesk_create_invoice` and `sevdesk_draft_invoice`
+  without it. Both now set it: an explicit `contactPersonId` wins, else the
+  account's only user (`GET /SevUser`); with several users the call asks
+  for a choice and names them.
 - Server listing and dispatch share one availability rule (`unavailableReason`),
   startup line and server instructions report the safe-mode state,
   `sevdesk_list_operations` gained a runtime `exclude` hook (the catalogue

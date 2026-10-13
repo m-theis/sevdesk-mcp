@@ -16,10 +16,16 @@ function stubProfile(): VatProfile {
   return { regime: "regular", source: "env", evidence: "test stub", ledger: null };
 }
 
-function ctxWith(opts: { dryRun?: boolean; unityFails?: boolean; created?: Row } = {}) {
+function ctxWith(
+  opts: { dryRun?: boolean; unityFails?: boolean; created?: Row; users?: Row[] | "fail" } = {},
+) {
   const sent: Array<{ method: string; path: string; body?: unknown }> = [];
   const client = {
     async getAll(path: string): Promise<Row[]> {
+      if (path === "/SevUser") {
+        if (opts.users === "fail") throw new Error("sevDesk API 500 on GET /SevUser");
+        return opts.users ?? [{ id: "1340649", fullname: "Moritz Theis" }];
+      }
       if (path === "/Unity") {
         if (opts.unityFails) throw new Error("sevDesk API 404 on GET /Unity");
         return [
@@ -99,6 +105,7 @@ describe("sevdesk_draft_invoice", () => {
     expect(body.invoice).toMatchObject({
       status: "100",
       invoiceType: "RE",
+      contactPerson: { id: 1340649, objectName: "SevUser" }, // the account's only user
       invoiceDate: "2026-10-13",
       deliveryDate: "2026-09-01",
       deliveryDateUntil: "2026-09-30",
@@ -199,6 +206,37 @@ describe("sevdesk_draft_invoice", () => {
     expect(sent).toEqual([]);
     await draftInvoice.handler({ ...valid, positions: [{ ...valid.positions[0]!, unity: 9 }] }, ctx);
     expect(sent).toHaveLength(1);
+  });
+
+  describe("contact person (SevUser)", () => {
+    it("uses an explicit contactPersonId without looking users up", async () => {
+      const { ctx, sent } = ctxWith({ users: "fail" });
+      await draftInvoice.handler({ ...valid, contactPersonId: "42" }, ctx);
+      expect((sent[0]!.body as { invoice: Row }).invoice.contactPerson).toEqual({ id: 42, objectName: "SevUser" });
+    });
+
+    it("demands a choice when the account has several users, naming them", async () => {
+      const { ctx, sent } = ctxWith({
+        users: [
+          { id: "1", fullname: "Anna Admin" },
+          { id: "2", fullname: "Ben Buchhaltung" },
+        ],
+      });
+      await expect(draftInvoice.handler(valid, ctx)).rejects.toThrow(
+        /2 users.*contactPersonId.*Anna Admin \(1\), Ben Buchhaltung \(2\)/,
+      );
+      expect(sent).toEqual([]);
+      await draftInvoice.handler({ ...valid, contactPersonId: "2" }, ctx);
+      expect((sent[0]!.body as { invoice: Row }).invoice.contactPerson).toEqual({ id: 2, objectName: "SevUser" });
+    });
+
+    it("explains itself when /SevUser fails or returns nobody", async () => {
+      const failing = ctxWith({ users: "fail" });
+      await expect(draftInvoice.handler(valid, failing.ctx)).rejects.toThrow(/GET \/SevUser failed.*contactPersonId/);
+      const empty = ctxWith({ users: [] });
+      await expect(draftInvoice.handler(valid, empty.ctx)).rejects.toThrow(/no users.*contactPersonId/);
+      await expect(draftInvoice.handler({ ...valid, contactPersonId: "x" }, empty.ctx)).rejects.toThrow(/numeric SevUser id/);
+    });
   });
 
   it("writes the §19 tax text for rule 11 and demands 0 % positions", async () => {
